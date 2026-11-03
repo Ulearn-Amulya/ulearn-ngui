@@ -1,6 +1,7 @@
 import { Routes } from '@angular/router';
 import { authGuard } from './core/guards/auth-guard';
 import { roleGuard } from './core/guards/role-guard';
+import { featurePermissionGuard } from './core/guards/feature-permission-guard';
 import { blockExamOnlyGuard } from './exam/guards/exam-guards';
 
 export const routes: Routes = [
@@ -79,6 +80,28 @@ export const routes: Routes = [
     canActivate: [authGuard, blockExamOnlyGuard],
     loadComponent: () =>
       import('./public/my-profile/my-profile').then(m => m.MyProfile)
+  },
+  {
+    path: 'crt',
+    canActivate: [authGuard, blockExamOnlyGuard, featurePermissionGuard],
+    data: { permission: 'crt.access' },
+    loadComponent: () => import('./crt/crt').then(m => m.Crt)
+  },
+  {
+    path: 'interview',
+    canActivate: [authGuard, blockExamOnlyGuard, featurePermissionGuard],
+    data: { permission: 'interview.access' },
+    children: [
+      {
+        path: '',
+        loadComponent: () => import('./interview/interview').then(m => m.Interview)
+      },
+      {
+        path: 'session/:id',
+        loadComponent: () =>
+          import('./interview/interview-session').then(m => m.InterviewSession)
+      }
+    ]
   },
 
   // ─── Exam portal (isolated) ───────────────────────────────────────────────
