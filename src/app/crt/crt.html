@@ -1,0 +1,32 @@
+<section class="crt-home">
+  <header class="page-header">
+    <h1>CRT</h1>
+    <p>Your published Campus Recruitment Training paths.</p>
+    <p><a routerLink="/crt/history">Attempt History</a></p>
+  </header>
+
+  @if (loading()) {
+    <p class="status" role="status">Loading learning paths...</p>
+  } @else if (loadError()) {
+    <div class="banner" role="alert">
+      <p>{{ loadError() }}</p>
+      <button type="button" class="btn-primary" (click)="load()">Try again</button>
+    </div>
+  } @else if (paths().length === 0) {
+    <p class="status">No learning paths assigned yet. Assigned paths will appear here.</p>
+  } @else {
+    <ul class="path-list">
+      @for (path of paths(); track path.id) {
+        <li class="path-card">
+          <h2>{{ path.title }}</h2>
+          @if (path.description) {
+            <p>{{ path.description }}</p>
+          }
+          <button type="button" class="btn-primary" (click)="viewModules(path.id)">
+            View Modules
+          </button>
+        </li>
+      }
+    </ul>
+  }
+</section>
