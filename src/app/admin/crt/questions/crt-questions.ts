@@ -10,18 +10,45 @@ import {
   viewChild
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { AbstractControl, FormBuilder, ReactiveFormsModule, ValidationErrors, Validators } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 import { ConfirmDialogService } from '../../../core/services/confirm-dialog.service';
 import { ToastService } from '../../../core/services/toast';
-import { CrtShell } from '../crt-shell/crt-shell';
 import {
-  CrtAnswer,
-  CrtContentStatus,
-  CrtDemoStore,
+  CrtAdminService,
+  CrtCorrectIndex,
   CrtDifficulty,
-  CrtQuestion
-} from '../crt-demo.store';
+  CrtModule,
+  CrtPath,
+  CrtQuestion,
+  CrtQuestionInput
+} from '../../services/crt-admin.service';
+import { CrtShell } from '../crt-shell/crt-shell';
+
+type CrtAnswer = 'A' | 'B' | 'C' | 'D';
+
+const ANSWERS: CrtAnswer[] = ['A', 'B', 'C', 'D'];
+
+function trimmedMinLength(min: number) {
+  return (control: AbstractControl): ValidationErrors | null => {
+    const value = String(control.value ?? '').trim();
+    return value.length >= min ? null : { minlength: { requiredLength: min, actualLength: value.length } };
+  };
+}
+
+interface QuestionView {
+  id: string;
+  moduleId: string;
+  text: string;
+  optionA: string;
+  optionB: string;
+  optionC: string;
+  optionD: string;
+  correct: CrtAnswer;
+  topic: string;
+  difficulty: CrtDifficulty | null;
+  explanation: string;
+}
 
 @Component({
   selector: 'app-crt-questions',
@@ -38,15 +65,9 @@ export class CrtQuestions implements OnInit {
   private readonly toast = inject(ToastService);
   private readonly confirmDialog = inject(ConfirmDialogService);
   private readonly destroyRef = inject(DestroyRef);
-  readonly store = inject(CrtDemoStore);
+  private readonly crtService = inject(CrtAdminService);
 
-  readonly filters = [
-    { id: 'all', label: 'All' },
-    { id: 'draft', label: 'Draft' },
-    { id: 'published', label: 'Published' }
-  ] as const;
-
-  readonly answers: CrtAnswer[] = ['A', 'B', 'C', 'D'];
+  readonly answers: CrtAnswer[] = ANSWERS;
   readonly difficulties: { id: CrtDifficulty; label: string }[] = [
     { id: 'easy', label: 'Easy' },
     { id: 'medium', label: 'Medium' },
@@ -54,16 +75,29 @@ export class CrtQuestions implements OnInit {
   ];
 
   readonly isLoading = signal(true);
+  readonly isSaving = signal(false);
+  readonly loadError = signal('');
+  readonly paths = signal<CrtPath[]>([]);
+  readonly modules = signal<CrtModule[]>([]);
+  readonly questions = signal<QuestionView[]>([]);
   readonly query = signal('');
-  readonly statusFilter = signal<'all' | CrtContentStatus>('all');
   readonly moduleFilter = signal('');
+  readonly topicFilter = signal('');
+  readonly difficultyFilter = signal<'all' | CrtDifficulty>('all');
   readonly showForm = signal(false);
   readonly editingId = signal<string | null>(null);
   readonly previewId = signal<string | null>(null);
   private readonly formHost = viewChild<ElementRef<HTMLElement>>('formHost');
+  private readonly previewHost = viewChild<ElementRef<HTMLElement>>('previewHost');
+
+  /** Keeps the current template bindings working until the question HTML is updated. */
+  readonly store = {
+    questions: () => this.questions(),
+    moduleTitle: (moduleId: string) => this.moduleTitle(moduleId)
+  };
 
   readonly form = this.fb.nonNullable.group({
-    text: ['', [Validators.required, Validators.minLength(5)]],
+    text: ['', [Validators.required, trimmedMinLength(5)]],
     optionA: ['', Validators.required],
     optionB: ['', Validators.required],
     optionC: ['', Validators.required],
@@ -71,44 +105,48 @@ export class CrtQuestions implements OnInit {
     correct: ['' as CrtAnswer | '', Validators.required],
     moduleId: ['', Validators.required],
     topic: ['', Validators.required],
-    difficulty: ['easy' as CrtDifficulty, Validators.required],
-    status: ['draft' as CrtContentStatus, Validators.required]
+    difficulty: ['easy' as CrtDifficulty | '', Validators.required],
+    explanation: ['']
   });
 
-  readonly moduleChoices = computed(() => this.store.modules()
+  readonly moduleChoices = computed(() => this.modules()
     .map((module) => ({
       id: module.id,
-      label: `${this.store.pathTitle(module.pathId)} — ${module.title}`
+      label: `${this.pathTitle(module.path_id)} — ${module.title}`
     }))
     .sort((a, b) => a.label.localeCompare(b.label)));
 
   readonly preview = computed(() => {
     const id = this.previewId();
-    return id ? this.store.questionById(id) : undefined;
+    return id ? this.questions().find((question) => question.id === id) : undefined;
   });
 
   readonly moduleFilterLabel = computed(() => {
     const id = this.moduleFilter();
     if (!id) return '';
-    const module = this.store.moduleById(id);
-    return module ? `${this.store.pathTitle(module.pathId)} — ${module.title}` : '';
+    const module = this.modules().find((item) => item.id === id);
+    return module ? `${this.pathTitle(module.path_id)} — ${module.title}` : '';
   });
 
   readonly moduleFilterError = computed(() => {
     const id = this.moduleFilter();
     if (!id || this.isLoading()) return '';
-    return this.store.moduleById(id) ? '' : 'That module was not found in the demonstration data.';
+    return this.modules().some((module) => module.id === id)
+      ? ''
+      : 'That module was not found.';
   });
 
   readonly visibleQuestions = computed(() => {
     const query = this.query().trim().toLowerCase();
-    const status = this.statusFilter();
     const moduleId = this.moduleFilter();
-    return this.store.questions().filter((question) => {
+    const topic = this.topicFilter().trim().toLowerCase();
+    const difficulty = this.difficultyFilter();
+    return this.questions().filter((question) => {
       if (moduleId && question.moduleId !== moduleId) return false;
-      if (status !== 'all' && question.status !== status) return false;
+      if (topic && !question.topic.toLowerCase().includes(topic)) return false;
+      if (difficulty !== 'all' && question.difficulty !== difficulty) return false;
       if (!query) return true;
-      const moduleTitle = this.store.moduleTitle(question.moduleId).toLowerCase();
+      const moduleTitle = this.moduleTitle(question.moduleId).toLowerCase();
       return question.text.toLowerCase().includes(query)
         || question.topic.toLowerCase().includes(query)
         || moduleTitle.includes(query);
@@ -119,31 +157,66 @@ export class CrtQuestions implements OnInit {
     this.route.queryParamMap.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((params) => {
       this.moduleFilter.set(params.get('moduleId') ?? '');
     });
-    const timer = setTimeout(() => this.isLoading.set(false), 280);
-    this.destroyRef.onDestroy(() => clearTimeout(timer));
+    void this.loadQuestions();
+  }
+
+  async loadQuestions(): Promise<void> {
+    this.isLoading.set(true);
+    this.loadError.set('');
+
+    try {
+      const [paths, modules, questions] = await Promise.all([
+        this.crtService.listPaths(),
+        this.crtService.listQuestionModules(),
+        this.crtService.listQuestions()
+      ]);
+      this.paths.set(paths);
+      this.modules.set(modules);
+      this.questions.set(questions.map((question) => this.toView(question)));
+    } catch (error) {
+      console.error('Failed to load CRT questions:', error);
+      const message = error instanceof Error ? error.message : 'Unable to load questions.';
+      this.loadError.set(message);
+      this.toast.error(message);
+    } finally {
+      this.isLoading.set(false);
+    }
   }
 
   onSearch(event: Event): void {
     this.query.set((event.target as HTMLInputElement).value);
   }
 
-  setFilter(id: 'all' | CrtContentStatus): void {
-    this.statusFilter.set(id);
+  setTopicFilter(topic: string): void {
+    this.topicFilter.set(topic);
+  }
+
+  setDifficultyFilter(difficulty: 'all' | CrtDifficulty): void {
+    this.difficultyFilter.set(difficulty);
+  }
+
+  setModuleFilter(moduleId: string): void {
+    this.moduleFilter.set(moduleId);
+    void this.router.navigate(['/admin/crt/questions'], {
+      queryParams: moduleId ? { moduleId } : {}
+    });
   }
 
   clearModuleFilter(): void {
-    void this.router.navigate(['/admin/crt/questions']);
+    this.setModuleFilter('');
   }
 
   openCreate(): void {
-    if (this.store.modules().length === 0) {
+    if (this.modules().length === 0) {
       this.toast.error('Add a module before creating a question.');
       return;
     }
     this.previewId.set(null);
     this.editingId.set(null);
     const preferred = this.moduleFilter();
-    const moduleId = this.store.moduleById(preferred) ? preferred : this.store.modules()[0].id;
+    const moduleId = this.modules().some((module) => module.id === preferred)
+      ? preferred
+      : this.modules()[0].id;
     this.form.reset({
       text: '',
       optionA: '',
@@ -154,15 +227,15 @@ export class CrtQuestions implements OnInit {
       moduleId,
       topic: '',
       difficulty: 'easy',
-      status: 'draft'
+      explanation: ''
     });
     this.revealForm();
   }
 
   openEdit(id: string): void {
-    const question = this.store.questionById(id);
+    const question = this.questions().find((item) => item.id === id);
     if (!question) {
-      this.toast.error('That question is no longer in the demonstration data.');
+      this.toast.error('That question was not found.');
       return;
     }
     this.previewId.set(null);
@@ -176,20 +249,21 @@ export class CrtQuestions implements OnInit {
       correct: question.correct,
       moduleId: question.moduleId,
       topic: question.topic,
-      difficulty: question.difficulty,
-      status: question.status
+      difficulty: question.difficulty ?? '',
+      explanation: question.explanation
     });
     this.revealForm();
   }
 
   openPreview(id: string): void {
-    if (!this.store.questionById(id)) {
-      this.toast.error('That question is no longer in the demonstration data.');
+    if (!this.questions().some((question) => question.id === id)) {
+      this.toast.error('That question was not found.');
       return;
     }
     this.showForm.set(false);
     this.editingId.set(null);
     this.previewId.set(id);
+    this.revealPreview();
   }
 
   closeForm(): void {
@@ -201,74 +275,135 @@ export class CrtQuestions implements OnInit {
     this.previewId.set(null);
   }
 
-  async remove(question: CrtQuestion): Promise<void> {
+  async remove(question: QuestionView): Promise<void> {
     const confirmed = await this.confirmDialog.confirm({
       title: 'Delete question',
-      message: 'Delete this question from the demonstration question bank?',
+      message: 'Delete this question from the question bank?',
       confirmLabel: 'Delete',
       variant: 'danger'
     });
     if (!confirmed) return;
-    this.store.deleteQuestion(question.id);
-    if (this.editingId() === question.id) this.closeForm();
-    if (this.previewId() === question.id) this.closePreview();
-    this.toast.success('Question deleted');
+
+    try {
+      await this.crtService.deleteQuestion(question.id);
+      if (this.editingId() === question.id) this.closeForm();
+      if (this.previewId() === question.id) this.closePreview();
+      this.toast.success('Question deleted');
+      await this.loadQuestions();
+    } catch (error) {
+      console.error('Failed to delete CRT question:', error);
+      this.toast.error(
+        error instanceof Error ? error.message : 'Unable to delete question.'
+      );
+    }
   }
 
-  save(): void {
+  async save(): Promise<void> {
     if (this.form.invalid || !this.form.controls.correct.value) {
       this.form.markAllAsTouched();
       this.toast.error('Check the highlighted fields.');
       return;
     }
+    if (this.isSaving()) return;
+
     const raw = this.form.getRawValue();
-    if (!this.store.moduleById(raw.moduleId)) {
+    if (!this.modules().some((module) => module.id === raw.moduleId)) {
       this.toast.error('Choose a module that still exists.');
       return;
     }
-    const correct = raw.correct;
-    if (correct !== 'A' && correct !== 'B' && correct !== 'C' && correct !== 'D') {
+    const correctIndex = this.correctIndex(raw.correct);
+    if (correctIndex === null) {
       this.toast.error('Select the correct answer.');
       return;
     }
 
-    const input = {
-      text: raw.text.trim(),
-      optionA: raw.optionA.trim(),
-      optionB: raw.optionB.trim(),
-      optionC: raw.optionC.trim(),
-      optionD: raw.optionD.trim(),
-      correct,
-      moduleId: raw.moduleId,
-      topic: raw.topic.trim(),
-      difficulty: raw.difficulty,
-      status: raw.status
+    const stem = raw.text.trim();
+    const topic = raw.topic.trim();
+    const difficulty = raw.difficulty;
+    if (difficulty !== 'easy' && difficulty !== 'medium' && difficulty !== 'hard') {
+      this.form.controls.difficulty.markAsTouched();
+      this.toast.error('Select a difficulty.');
+      return;
+    }
+    const input: CrtQuestionInput = {
+      stem,
+      options: [raw.optionA.trim(), raw.optionB.trim(), raw.optionC.trim(), raw.optionD.trim()],
+      correct_index: correctIndex,
+      module_id: raw.moduleId,
+      topic,
+      difficulty,
+      explanation: raw.explanation.trim()
     };
-    if (!input.text || !input.optionA || !input.optionB || !input.optionC || !input.optionD || !input.topic) {
+    if (input.options.some((option) => option.length === 0) || stem.length < 5 || !topic) {
       this.form.markAllAsTouched();
       this.toast.error('Check the highlighted fields.');
       return;
     }
 
-    const editingId = this.editingId();
-    if (editingId) {
-      const updated = this.store.updateQuestion(editingId, input);
-      if (!updated) {
-        this.toast.error('That question is no longer in the demonstration data.');
-        return;
+    this.isSaving.set(true);
+    try {
+      const editingId = this.editingId();
+      if (editingId) {
+        await this.crtService.updateQuestion(editingId, input);
+        this.toast.success('Question updated');
+      } else {
+        await this.crtService.createQuestion(input);
+        this.toast.success('Question saved');
       }
-      this.toast.success('Question updated');
-    } else {
-      this.store.createQuestion(input);
-      this.toast.success('Question saved');
+      this.closeForm();
+      await this.loadQuestions();
+    } catch (error) {
+      console.error('Failed to save CRT question:', error);
+      this.toast.error(
+        error instanceof Error ? error.message : 'Unable to save question.'
+      );
+    } finally {
+      this.isSaving.set(false);
     }
-    this.closeForm();
+  }
+
+  moduleTitle(moduleId: string): string {
+    return this.modules().find((module) => module.id === moduleId)?.title ?? 'Unknown module';
+  }
+
+  private pathTitle(pathId: string): string {
+    return this.paths().find((path) => path.id === pathId)?.title ?? 'Unknown path';
+  }
+
+  private toView(question: CrtQuestion): QuestionView {
+    const [optionA = '', optionB = '', optionC = '', optionD = ''] = question.options;
+    return {
+      id: question.id,
+      moduleId: question.module_id,
+      text: question.stem,
+      optionA,
+      optionB,
+      optionC,
+      optionD,
+      correct: ANSWERS[question.correct_index] ?? 'A',
+      topic: question.topic ?? '',
+      difficulty: question.difficulty,
+      explanation: question.explanation ?? ''
+    };
+  }
+
+  private correctIndex(answer: CrtAnswer | ''): CrtCorrectIndex | null {
+    const index = ANSWERS.indexOf(answer as CrtAnswer);
+    if (index < 0 || index > 3) return null;
+    return index as CrtCorrectIndex;
   }
 
   private revealForm(): void {
     this.showForm.set(true);
     const timer = setTimeout(() => {
       this.formHost()?.nativeElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+    this.destroyRef.onDestroy(() => clearTimeout(timer));
+  }
+
+  private revealPreview(): void {
+    const timer = setTimeout(() => {
+      this.previewHost()?.nativeElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
     this.destroyRef.onDestroy(() => clearTimeout(timer));
   }

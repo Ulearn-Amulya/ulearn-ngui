@@ -19,6 +19,31 @@ export interface CrtModule {
   created_at: string;
 }
 
+export type CrtDifficulty = 'easy' | 'medium' | 'hard';
+export type CrtCorrectIndex = 0 | 1 | 2 | 3;
+
+export interface CrtQuestion {
+  id: string;
+  module_id: string;
+  stem: string;
+  options: [string, string, string, string];
+  correct_index: CrtCorrectIndex;
+  topic: string | null;
+  difficulty: CrtDifficulty | null;
+  explanation: string | null;
+  created_at: string;
+}
+
+export interface CrtQuestionInput {
+  module_id: string;
+  stem: string;
+  options: [string, string, string, string];
+  correct_index: CrtCorrectIndex;
+  topic?: string | null;
+  difficulty?: CrtDifficulty | null;
+  explanation?: string | null;
+}
+
 @Injectable({
   providedIn: 'root',
 })
@@ -137,5 +162,69 @@ export class CrtAdminService {
 
       if (error) throw new Error(error.message);
     }
+  }
+
+  async listQuestions(): Promise<CrtQuestion[]> {
+    const { data, error } = await supabase
+      .from('crt_questions_staff')
+      .select('id, module_id, stem, options, correct_index, topic, difficulty, explanation, created_at')
+      .order('created_at', { ascending: false });
+
+    if (error) throw new Error(error.message);
+    return (data ?? []) as CrtQuestion[];
+  }
+
+  async listQuestionModules(): Promise<CrtModule[]> {
+    const { data, error } = await supabase
+      .from('crt_modules')
+      .select('*')
+      .order('sort_order', { ascending: true });
+
+    if (error) throw new Error(error.message);
+    return (data ?? []) as CrtModule[];
+  }
+
+  async createQuestion(input: CrtQuestionInput): Promise<CrtQuestion> {
+    const { data, error } = await supabase
+      .from('crt_questions_staff')
+      .insert(this.questionPayload(input))
+      .select('id, module_id, stem, options, correct_index, topic, difficulty, explanation, created_at')
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data as CrtQuestion;
+  }
+
+  async updateQuestion(id: string, input: CrtQuestionInput): Promise<CrtQuestion> {
+    const { data, error } = await supabase
+      .from('crt_questions_staff')
+      .update(this.questionPayload(input))
+      .eq('id', id)
+      .select('id, module_id, stem, options, correct_index, topic, difficulty, explanation, created_at')
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data as CrtQuestion;
+  }
+
+  async deleteQuestion(id: string): Promise<void> {
+    const { error } = await supabase
+      .from('crt_questions_staff')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(error.message);
+  }
+
+  private questionPayload(input: CrtQuestionInput) {
+    return {
+      module_id: input.module_id,
+      stem: input.stem.trim(),
+      options: input.options.map((option) => option.trim()) as [string, string, string, string],
+      correct_index: input.correct_index,
+      topic: input.topic?.trim() || null,
+      difficulty: input.difficulty ?? null,
+      explanation: input.explanation?.trim() || null,
+    };
   }
 }
