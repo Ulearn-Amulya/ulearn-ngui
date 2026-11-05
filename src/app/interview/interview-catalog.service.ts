@@ -1,11 +1,20 @@
 import { Injectable } from '@angular/core';
-import { supabase } from '../core/supabase.client';
+import { invokeAuthedFunction, supabase } from '../core/supabase.client';
 import {
   InterviewSessionStatus,
   InterviewSessionSummary,
   InterviewTemplate,
   InterviewTemplateKind,
+  InterviewTurn,
+  InterviewTurnRole,
 } from '../models';
+import {
+  InterviewRequestError,
+  interviewFunctionError,
+  parseInterviewTurnResponse,
+  type InterviewTurnResponse,
+} from './interview-api';
+import { positiveDurationMinutes } from './interview-timer';
 
 const TEMPLATE_KINDS: readonly InterviewTemplateKind[] = ['hr', 'technical', 'domain'];
 const SESSION_STATUSES: readonly InterviewSessionStatus[] = ['in_progress', 'completed', 'failed'];
@@ -25,7 +34,12 @@ interface SessionRow {
   status: string;
   template_id: string;
   prompt_version: string;
-  interview_templates: { title: string; kind: string } | { title: string; kind: string }[] | null;
+  started_at: string;
+  ended_at?: string | null;
+  interview_templates:
+    | { title: string; kind: string; duration_minutes: number | string }
+    | { title: string; kind: string; duration_minutes: number | string }[]
+    | null;
 }
 
 /**
@@ -81,10 +95,37 @@ function asTemplateRow(value: unknown): TemplateRow | null {
 
 function embeddedTemplate(
   value: SessionRow['interview_templates']
-): { title: string; kind: string } | null {
+): { title: string; kind: string; duration_minutes: number } | null {
   const row = Array.isArray(value) ? value[0] : value;
-  if (!row || typeof row.title !== 'string' || typeof row.kind !== 'string') return null;
-  return row;
+  const duration = positiveDurationMinutes(row?.duration_minutes);
+  if (!row || typeof row.title !== 'string' || typeof row.kind !== 'string' || duration === null) {
+    return null;
+  }
+  return { title: row.title, kind: row.kind, duration_minutes: duration };
+}
+
+const TURN_ROLES: readonly InterviewTurnRole[] = ['user', 'assistant'];
+
+function asTurn(value: unknown): InterviewTurn | null {
+  if (!isRecord(value)) return null;
+  const id = value['id'];
+  const role = value['role'];
+  const content = value['content'];
+  const seq = value['seq'];
+  const createdAt = value['created_at'] ?? value['createdAt'];
+  if (
+    typeof id !== 'string' ||
+    typeof role !== 'string' ||
+    typeof content !== 'string' ||
+    typeof createdAt !== 'string' ||
+    !TURN_ROLES.includes(role as InterviewTurnRole) ||
+    (typeof seq !== 'number' && typeof seq !== 'string')
+  ) {
+    return null;
+  }
+  const seqNumber = typeof seq === 'number' ? seq : Number(seq);
+  if (!Number.isInteger(seqNumber) || seqNumber <= 0) return null;
+  return { id, role: role as InterviewTurnRole, content, seq: seqNumber, createdAt };
 }
 
 @Injectable({ providedIn: 'root' })
@@ -148,7 +189,7 @@ export class InterviewCatalogService {
   async getOwnSession(sessionId: string): Promise<InterviewSessionSummary | null> {
     const { data, error } = await supabase
       .from('interview_sessions')
-      .select('id, status, template_id, prompt_version, interview_templates(title, kind)')
+      .select('id, status, template_id, prompt_version, started_at, ended_at, interview_templates(title, kind, duration_minutes)')
       .eq('id', sessionId)
       .maybeSingle();
 
@@ -162,6 +203,7 @@ export class InterviewCatalogService {
       typeof row.status !== 'string' ||
       typeof row.template_id !== 'string' ||
       typeof row.prompt_version !== 'string' ||
+      typeof row.started_at !== 'string' ||
       !isSessionStatus(row.status) ||
       !template ||
       !isTemplateKind(template.kind)
@@ -176,8 +218,125 @@ export class InterviewCatalogService {
       templateTitle: template.title,
       templateKind: template.kind,
       promptVersion: row.prompt_version,
+      startedAt: row.started_at,
+      endedAt: typeof row.ended_at === 'string' ? row.ended_at : null,
+      durationMinutes: template.duration_minutes,
     };
   }
+
+  /** Stored turns for a session the signed-in student owns. Ordered by seq. */
+  async listOwnTurns(sessionId: string): Promise<InterviewTurn[]> {
+    const { data, error } = await supabase
+      .from('interview_turns')
+      .select('id, role, content, seq, created_at')
+      .eq('session_id', sessionId)
+      .order('seq', { ascending: true });
+
+    if (error) throw error;
+
+    const turns: InterviewTurn[] = [];
+    for (const item of data ?? []) {
+      const turn = asTurn(item);
+      if (turn) turns.push(turn);
+    }
+    return turns.sort((left, right) => left.seq - right.seq);
+  }
+
+  /**
+   * Send one answer to the interview-turn Edge Function.
+   * The same clientTurnId is reused when the student retries that answer.
+   */
+  async submitAnswer(
+    sessionId: string,
+    answer: string,
+    clientTurnId: string
+  ): Promise<InterviewTurnResponse> {
+    const { data, error } = await invokeAuthedFunction<unknown>('interview-turn', {
+      sessionId,
+      answer,
+      clientTurnId,
+    });
+
+    if (error) throw await interviewFunctionError(error);
+    const parsed = parseInterviewTurnResponse(data);
+    if (!parsed) {
+      throw new InterviewRequestError(
+        'The interviewer response was incomplete. Please try again.',
+        'BAD_RESPONSE'
+      );
+    }
+    return parsed;
+  }
+
+  /**
+   * Ask the database to finish this session.
+   * manual uses the database clock. expired uses started_at + duration, and only after that time.
+   * A session that is already finished comes back unchanged.
+   */
+  async finishOwnSession(
+    sessionId: string,
+    mode: 'manual' | 'expired'
+  ): Promise<InterviewFinishResult> {
+    const { data, error } = await supabase.rpc('finish_own_interview_session', {
+      p_session_id: sessionId,
+      p_mode: mode,
+    });
+    if (error) throw new Error('This interview could not be ended. Please try again.');
+
+    const row = finishRow(data);
+    if (!row) throw new Error('This interview could not be ended. Please try again.');
+    const current = await this.getOwnSession(sessionId);
+    if (row.status === 'completed' && current?.status !== 'completed') {
+      throw new Error('This interview could not be ended. Please try again.');
+    }
+    return {
+      session: current,
+      status: row.status,
+      timeUp: row.timeUp,
+      serverNow: row.serverNow,
+      endsAt: row.endsAt,
+    };
+  }
+
+  /**
+   * Mark the signed-in student's session completed at the database clock.
+   * A second call succeeds without changing the original ended_at.
+   */
+  async completeOwnSession(sessionId: string): Promise<InterviewSessionSummary> {
+    const result = await this.finishOwnSession(sessionId, 'manual');
+    if (result.session?.status !== 'completed') {
+      throw new Error('This interview could not be ended. Please try again.');
+    }
+    return result.session;
+  }
+}
+
+export interface InterviewFinishResult {
+  session: InterviewSessionSummary | null;
+  status: InterviewSessionStatus | null;
+  timeUp: boolean;
+  serverNow: string | null;
+  endsAt: string | null;
+}
+
+function finishRow(data: unknown): {
+  status: InterviewSessionStatus;
+  timeUp: boolean;
+  serverNow: string | null;
+  endsAt: string | null;
+} | null {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!isRecord(row)) return null;
+  const status = row['status'];
+  if (typeof status !== 'string' || !isSessionStatus(status)) return null;
+  const serverNow = row['server_now'];
+  const endsAt = row['ends_at'];
+  return {
+    status,
+    timeUp: row['time_up'] === true,
+    serverNow: typeof serverNow === 'string' ? serverNow : null,
+    endsAt: typeof endsAt === 'string' ? endsAt : null,
+  };
 }
 
 export function interviewErrorMessage(error: unknown, fallback: string): string {

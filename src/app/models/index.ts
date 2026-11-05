@@ -753,6 +753,8 @@ export type InterviewTemplateKind = 'hr' | 'technical' | 'domain';
 
 export type InterviewSessionStatus = 'in_progress' | 'completed' | 'failed';
 
+export type InterviewTurnRole = 'user' | 'assistant';
+
 /** Published interview template shown in the student catalog. */
 export interface InterviewTemplate {
   id: string;
@@ -771,4 +773,16 @@ export interface InterviewSessionSummary {
   templateTitle: string;
   templateKind: InterviewTemplateKind;
   promptVersion: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationMinutes: number;
+}
+
+/** One stored student or interviewer message. */
+export interface InterviewTurn {
+  id: string;
+  role: InterviewTurnRole;
+  content: string;
+  seq: number;
+  createdAt: string;
 }
