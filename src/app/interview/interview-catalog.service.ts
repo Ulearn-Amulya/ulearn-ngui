@@ -496,6 +496,7 @@ export class InterviewCatalogService {
         mentorAdjusted = hasMentorAdjustments(aiCompetencies, overrides);
       }
 
+      if (!isSessionStatus(row.status)) continue;
       items.push({
         id: row.id,
         templateTitle: template ?? 'Interview session',
@@ -697,9 +698,9 @@ export class InterviewCatalogService {
    * Mark the signed-in student's session completed at the database clock.
    * A second call succeeds without changing the original ended_at.
    */
-  async completeOwnSession(sessionId: string): Promise<InterviewSessionSummary> {
+  async completeOwnSession(sessionId: string): Promise<InterviewSessionDetails> {
     const result = await this.finishOwnSession(sessionId, 'manual');
-    if (result.session?.status !== 'completed') {
+    if (!result.session || result.session.status !== 'completed') {
       throw new Error('This interview could not be ended. Please try again.');
     }
     return result.session;
@@ -713,7 +714,7 @@ export class InterviewCatalogService {
     const { data, error } = await supabase
       .from('interview_sessions')
       .select(
-        'id, status, template_id, prompt_version, template_version_id, redo_of_session_id, started_at, ended_at, overall_score, evaluation_status, eval_version, evaluated_at, evaluation_summary, evaluation_strengths, evaluation_improvements, evaluation_claimed_at, mentor_review_published, interview_templates(title, kind, duration_minutes)'
+        'id, status, template_id, prompt_version, template_version_id, redo_of_session_id, started_at, ended_at, overall_score, evaluation_status, eval_version, evaluated_at, evaluation_summary, evaluation_strengths, evaluation_improvements, evaluation_tips, evaluation_claimed_at, mentor_review_published, interview_templates(title, kind, duration_minutes)'
       )
       .eq('id', sessionId)
       .maybeSingle();
@@ -770,7 +771,7 @@ export class InterviewCatalogService {
 }
 
 export interface InterviewFinishResult {
-  session: InterviewSessionSummary | null;
+  session: InterviewSessionDetails | null;
   status: InterviewSessionStatus | null;
   timeUp: boolean;
   serverNow: string | null;

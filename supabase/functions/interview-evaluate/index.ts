@@ -10,6 +10,7 @@ import {
   mergeCodingCompetency,
   parseEvaluationPayload,
   planEvaluation,
+  resolvePracticeTips,
   requestEvaluationReply,
   type SessionCodingRow,
   type TranscriptTurn,
@@ -68,7 +69,7 @@ Deno.serve(async (req) => {
 
     const sessionResult = await userClient
       .from('interview_sessions')
-      .select('id, user_id, status, template_id, evaluation_status, eval_version, evaluation_claimed_at, overall_score, evaluation_summary, evaluation_strengths, evaluation_improvements, evaluated_at')
+      .select('id, user_id, status, template_id, evaluation_status, eval_version, evaluation_claimed_at, overall_score, evaluation_summary, evaluation_strengths, evaluation_improvements, evaluation_tips, evaluated_at')
       .eq('id', sessionId)
       .maybeSingle();
     if (sessionResult.error) return fail(500, 'SESSION_LOAD_FAILED', 'Could not open this interview.', sessionId);
@@ -210,12 +211,24 @@ Deno.serve(async (req) => {
       );
     }
 
+    const tips = resolvePracticeTips({
+      rawTips: parsed.evaluation.modelTips,
+      competencies: mergedCompetencies,
+      strengths: parsed.evaluation.strengths,
+      improvements: parsed.evaluation.improvements,
+    });
+    if (tips.length < 3 || tips.length > 5) {
+      await markFailed(writer, session.id, claim.claimedAt);
+      return fail(502, 'INVALID_EVALUATION', CLIENT_MESSAGE['INVALID_EVALUATION'], sessionId);
+    }
+
     const saved = await applyEvaluation(writer, {
       sessionId: session.id,
       claimedAt: claim.claimedAt,
       summary: parsed.evaluation.summary,
       strengths: parsed.evaluation.strengths,
       improvements: parsed.evaluation.improvements,
+      tips,
       scores: mergedCompetencies.map((item) => ({
         competency: item.competency,
         score: item.score,
@@ -320,7 +333,7 @@ async function loadStored(
     if (!reload) return null;
     const again = await userClient
       .from('interview_sessions')
-      .select('evaluation_status, eval_version, overall_score, evaluation_summary, evaluation_strengths, evaluation_improvements, evaluated_at')
+      .select('evaluation_status, eval_version, overall_score, evaluation_summary, evaluation_strengths, evaluation_improvements, evaluation_tips, evaluated_at')
       .eq('id', session.id)
       .maybeSingle();
     if (again.error || !again.data) return null;
@@ -342,6 +355,7 @@ async function loadStored(
     summary: session.summary,
     strengths: session.strengths,
     improvements: session.improvements,
+    tips: session.tips,
     evaluatedAt: session.evaluatedAt,
     scores: data,
   });
@@ -385,11 +399,14 @@ async function applyEvaluation(
     summary: string;
     strengths: string[];
     improvements: string[];
+    tips: string[];
     scores: { competency: string; score: number; rationale: string; evidence: string }[];
   }
 ): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; status: number; code: string }> {
   const expected = aggregateOverallScore(input.scores.map((score) => score.score));
-  if (expected === null) return { ok: false, status: 502, code: 'INVALID_EVALUATION' };
+  if (expected === null || input.tips.length < 3 || input.tips.length > 5) {
+    return { ok: false, status: 502, code: 'INVALID_EVALUATION' };
+  }
   const { data, error } = await writer.rpc('apply_interview_evaluation', {
     p_session_id: input.sessionId,
     p_eval_version: EVAL_VERSION,
@@ -398,6 +415,7 @@ async function applyEvaluation(
     p_improvements: input.improvements,
     p_scores: input.scores,
     p_claimed_at: input.claimedAt,
+    p_tips: input.tips,
   });
   if (error) {
     console.error(JSON.stringify({
@@ -422,7 +440,9 @@ async function applyEvaluation(
     summary: typeof row?.['evaluation_summary'] === 'string' ? row['evaluation_summary'] : '',
     strengths: row?.['evaluation_strengths'],
     improvements: row?.['evaluation_improvements'],
+    tips: row?.['evaluation_tips'],
     evaluatedAt: typeof row?.['evaluated_at'] === 'string' ? row['evaluated_at'] : null,
+    requireTips: outcome === 'completed',
     scores: row?.['scores'],
   });
   if (!body) return { ok: false, status: 500, code: 'NOT_SAVED' };
@@ -461,15 +481,19 @@ function bodyFromParts(input: {
   summary: string;
   strengths: unknown;
   improvements: unknown;
+  tips?: unknown;
   evaluatedAt: string | null;
   scores: unknown;
+  requireTips?: boolean;
 }): Record<string, unknown> | null {
   const strengths = textList(input.strengths);
   const improvements = textList(input.improvements);
   const competencies = scoreList(input.scores);
+  const tips = practiceTips(input.tips);
   if (!input.evalVersion || input.overallScore === null || !input.summary.trim() || !strengths || !improvements || !competencies) {
     return null;
   }
+  if (input.requireTips && tips.length < 3) return null;
   const mean = aggregateOverallScore(competencies.map((item) => item['score'] as number));
   if (mean === null || Math.abs(mean - input.overallScore) > 0.011) return null;
   return {
@@ -480,6 +504,7 @@ function bodyFromParts(input: {
     summary: input.summary.trim(),
     strengths,
     improvements,
+    tips,
     evaluatedAt: input.evaluatedAt,
     competencies,
   };
@@ -497,6 +522,7 @@ interface SessionRow {
   summary: string | null;
   strengths: unknown;
   improvements: unknown;
+  tips: unknown;
   evaluatedAt: string | null;
 }
 
@@ -524,6 +550,7 @@ function asSession(value: unknown): SessionRow | null {
     summary: typeof value['evaluation_summary'] === 'string' ? value['evaluation_summary'] : null,
     strengths: value['evaluation_strengths'],
     improvements: value['evaluation_improvements'],
+    tips: value['evaluation_tips'],
     evaluatedAt: typeof value['evaluated_at'] === 'string' ? value['evaluated_at'] : null,
   };
 }
@@ -565,6 +592,24 @@ function scoreList(value: unknown): Record<string, unknown>[] | null {
     scores.push({ competency: item['competency'], score, feedback, evidence });
   }
   return scores;
+}
+
+function practiceTips(value: unknown): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const items: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') return [];
+    const text = item.trim().replace(/\s+/g, ' ');
+    if (!text || text.length > 400) return [];
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(text);
+  }
+  if (items.length < 3 || items.length > 5) return [];
+  return items;
 }
 
 function textList(value: unknown): string[] | null {
