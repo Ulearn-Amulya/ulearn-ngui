@@ -1,6 +1,7 @@
 import type {
   InterviewCompetencyComparison,
   InterviewCompetencyScore,
+  InterviewCompetencyScoreView,
   InterviewEvaluationComparison,
   InterviewEvaluationSnapshot,
   InterviewEvaluationStatus,
@@ -11,6 +12,14 @@ import type {
   InterviewTemplateKind,
   InterviewTurn,
 } from '../models';
+import {
+  effectiveCompetencyScore,
+  effectiveOverallScore,
+  hasMentorAdjustments,
+  overridesForEvalVersion,
+  parseOverrideRows,
+  type InterviewScoreOverrideRecord,
+} from './interview-score-overrides.ts';
 
 const SESSION_STATUSES: readonly InterviewSessionStatus[] = ['in_progress', 'completed', 'failed'];
 const EVAL_STATUSES: readonly InterviewEvaluationStatus[] = ['pending', 'processing', 'completed', 'failed'];
@@ -219,7 +228,8 @@ export function parseInterviewEvaluationResponse(value: unknown): InterviewEvalu
 export function parseEvaluationSnapshot(
   sessionRow: unknown,
   scoreRows: unknown,
-  turnRows: readonly InterviewTurn[]
+  turnRows: readonly InterviewTurn[],
+  overrideRows: unknown = []
 ): InterviewEvaluationSnapshot | null {
   if (!isRecord(sessionRow)) return null;
   const id = sessionRow['id'];
@@ -247,6 +257,7 @@ export function parseEvaluationSnapshot(
   const evaluatedAt = sessionRow['evaluated_at'];
   const claimedAt = sessionRow['evaluation_claimed_at'];
   const summary = sessionRow['evaluation_summary'];
+  const mentorReviewPublished = sessionRow['mentor_review_published'] === true;
   const templateVersionId = sessionRow['template_version_id'];
   const redoOfSessionId = sessionRow['redo_of_session_id'];
   const session: InterviewSessionSummary = {
@@ -263,21 +274,62 @@ export function parseEvaluationSnapshot(
     durationMinutes: template.durationMinutes,
   };
 
-  const competencies = parseScores(scoreRows).filter((score) => !version || score.evalVersion === version);
+  const aiCompetencies = parseScores(scoreRows).filter((score) => !version || score.evalVersion === version);
   const turns = [...turnRows].sort((left, right) => left.seq - right.seq);
+  const aiOverallScore = finiteScore(sessionRow['overall_score']);
+  const overrides = mentorReviewPublished
+    ? overridesForEvalVersion(parseOverrideRows(overrideRows), version)
+    : [];
 
   return {
     session,
     evaluationStatus: typeof evaluationStatus === 'string' && isEvalStatus(evaluationStatus) ? evaluationStatus : null,
     evalVersion: version,
-    overallScore: finiteScore(sessionRow['overall_score']),
+    aiOverallScore,
+    mentorReviewPublished,
+    ...buildDisplayedScores(aiCompetencies, aiOverallScore, mentorReviewPublished, overrides),
     summary: typeof summary === 'string' && summary.trim() ? summary.trim() : null,
     strengths: textList(sessionRow['evaluation_strengths']) ?? [],
     improvements: textList(sessionRow['evaluation_improvements']) ?? [],
     evaluatedAt: typeof evaluatedAt === 'string' ? evaluatedAt : null,
     claimedAt: typeof claimedAt === 'string' ? claimedAt : null,
-    competencies,
     turns,
+  };
+}
+
+function buildDisplayedScores(
+  aiCompetencies: readonly InterviewCompetencyScore[],
+  aiOverallScore: number | null,
+  mentorReviewPublished: boolean,
+  overrides: readonly InterviewScoreOverrideRecord[]
+): Pick<InterviewEvaluationSnapshot, 'overallScore' | 'competencies' | 'mentorAdjusted'> {
+  if (!mentorReviewPublished || overrides.length === 0) {
+    return {
+      overallScore: aiOverallScore,
+      mentorAdjusted: false,
+      competencies: aiCompetencies.map((row) => ({
+        ...row,
+        aiScore: row.score,
+        mentorAdjusted: false,
+      })),
+    };
+  }
+
+  const baselines = aiCompetencies.map((row) => ({ competency: row.competency, score: row.score }));
+  const competencies: InterviewCompetencyScoreView[] = aiCompetencies.map((row) => {
+    const effective = effectiveCompetencyScore(row.competency, row.score, overrides);
+    return {
+      ...row,
+      score: effective,
+      aiScore: row.score,
+      mentorAdjusted: effective !== row.score,
+    };
+  });
+  const overallScore = effectiveOverallScore(baselines, overrides, aiOverallScore);
+  return {
+    overallScore,
+    competencies,
+    mentorAdjusted: hasMentorAdjustments(baselines, overrides),
   };
 }
 
