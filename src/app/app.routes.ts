@@ -148,6 +148,11 @@ export const routes: Routes = [
           import('./interview/interview-history').then(m => m.InterviewHistory)
       },
       {
+        path: 'session/:id/result',
+        loadComponent: () =>
+          import('./interview/interview-result').then(m => m.InterviewResult)
+      },
+      {
         path: 'session/:id/feedback',
         loadComponent: () =>
           import('./interview/interview-session-feedback').then(m => m.InterviewSessionFeedback)
