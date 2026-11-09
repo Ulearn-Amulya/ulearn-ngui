@@ -1,0 +1,53 @@
+<section class="crt-skills">
+  <header class="page-header">
+    <a routerLink="/crt">Back to CRT Home</a>
+    <h1>Topic Strength / Weakness</h1>
+    <p>Accuracy for each topic in the selected learning path, using your submitted practice and mock answers.</p>
+  </header>
+
+  @if (loading()) {
+    <p class="status" role="status">Loading topic performance...</p>
+  } @else if (loadError()) {
+    <div class="banner" role="alert">
+      <p>{{ loadError() }}</p>
+      <button type="button" class="btn-primary" (click)="load()">Try again</button>
+    </div>
+  } @else if (paths().length === 0) {
+    <p class="status">No published learning paths are available yet.</p>
+  } @else {
+    <label class="path-picker">
+      Learning path
+      <select [value]="selectedPathId()" (change)="selectPath($event)">
+        @for (path of paths(); track path.id) {
+          <option [value]="path.id">{{ path.title }}</option>
+        }
+      </select>
+    </label>
+
+    @if (topics().length === 0) {
+      <p class="status">No graded topic answers are available for this path yet.</p>
+    } @else {
+      <div class="table-wrap">
+        <table>
+          <caption class="visually-hidden">Topic accuracy</caption>
+          <thead>
+            <tr>
+              <th>Topic</th>
+              <th>Accuracy</th>
+              <th>Answers</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (topic of topics(); track topic.topic) {
+              <tr>
+                <td>{{ topic.topic }}</td>
+                <td>{{ topic.accuracy }}%</td>
+                <td>{{ topic.answerCount }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    }
+  }
+</section>

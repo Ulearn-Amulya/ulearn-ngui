@@ -88,6 +88,12 @@ export const routes: Routes = [
     loadComponent: () => import('./crt/crt').then(m => m.Crt)
   },
   {
+    path: 'crt/skills',
+    canActivate: [authGuard, blockExamOnlyGuard, featurePermissionGuard],
+    data: { permission: 'crt.access' },
+    loadComponent: () => import('./crt/skills/crt-skills').then(m => m.CrtSkills)
+  },
+  {
     path: 'crt/paths/:pathId/modules',
     canActivate: [authGuard, blockExamOnlyGuard, featurePermissionGuard],
     data: { permission: 'crt.access' },
