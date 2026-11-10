@@ -69,8 +69,13 @@ export const adminRoutes: Routes = [
         import('./crt/packs/crt-packs').then(m => m.CrtPacks)),
       gated('crt/assignments', 'batches.manage', () =>
         import('./crt/assignments/crt-assignments').then(m => m.CrtAssignments)),
-      gated('crt/announcements', 'crt.access', () =>
-        import('./crt/announcements/crt-announcements').then(m => m.CrtAnnouncements)),
+      {
+        path: 'crt/announcements',
+        canActivate: [permissionGuard],
+        data: { requireIsAdmin: true },
+        loadComponent: () =>
+          import('./crt/announcements/crt-announcements').then(m => m.CrtAnnouncements),
+      },
       gated('sessions', 'sessions.manage', () =>
         import('./sessions-management/sessions-management').then(m => m.SessionsManagement)),
       gated('sessions/schedule', 'sessions.manage', () =>
